@@ -630,10 +630,8 @@ export default function App() {
       const data = await res.json();
       if (res.ok) {
         setFeedback({ message: `Payment ${paymentId} verified successfully.`, type: 'success' });
-        const p = adminPayments.find((x) => x.id === paymentId);
-        if (p) {
-          syncPaymentToFirebase({ ...p, status: 'verified', verifiedAt: Date.now() });
-        }
+        // status is server-owned: /admin/payments/:id/verify already wrote
+        // it to Firebase via the Admin SDK. No client write needed.
         fetchAdminData();
       } else {
         setFeedback({ message: data.error || 'Verification failed', type: 'error' });
@@ -660,10 +658,7 @@ export default function App() {
       });
       if (res.ok) {
         setFeedback({ message: `Payment ${paymentId} rejected.`, type: 'info' });
-        const p = adminPayments.find((x) => x.id === paymentId);
-        if (p) {
-          syncPaymentToFirebase({ ...p, status: 'rejected', reason: rejectReason });
-        }
+        // status is server-owned: the reject endpoint already synced it.
         setSelectedPaymentForReject(null);
         fetchAdminData();
       }

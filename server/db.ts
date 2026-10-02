@@ -17,6 +17,8 @@ const DB_FILE_PATH = path.resolve(process.cwd(), 'shipu_db.json');
 
 export interface UserRecord {
   uid: string;
+  /** Firebase Auth UID. Falls back to `uid` when the account was never synced. */
+  firebaseUid?: string;
   username: string;
   usernameLower: string;
   email: string;

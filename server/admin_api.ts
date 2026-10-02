@@ -4,7 +4,8 @@
  */
 
 import crypto from 'crypto';
-import { db, UserRecord, PaymentRecord } from './db.ts';
+import { db, UserRecord } from './db.ts';
+import type { PaymentRecord } from './db.ts';
 import {
   computeNewExpiry,
   effectiveSubscription,
@@ -16,6 +17,12 @@ import {
   SUB_ACTIVE,
 } from './subscription.ts';
 import { createSession, tokenFor } from './purchase.ts';
+import {
+  syncPayment,
+  syncSubscription as firebaseSyncSubscription,
+  syncUser,
+  userPathByUsername,
+} from './firebase_sync.ts';
 
 export const DEFAULT_FREE_DAILY_REPLIES = 25;
 export const DEFAULT_PRO_DURATION_DAYS = 30;
@@ -131,9 +138,28 @@ export function registerAccount(
   db.usernameIndex.set(lower, uid);
   db.users.set(uid, user);
 
+  // Publish under BOTH keys so the Termux tool can find the account by
+  // `users/user-{slug}` the moment the username is bound.
+  syncUser({
+    uid: user.uid,
+    firebaseUid: user.firebaseUid || user.uid,
+    username: clean,
+    email: user.email,
+    plan: user.plan,
+    role: user.role,
+    subscription: user.subscription,
+  }).catch((error) =>
+    console.warn('[firebase-sync] user sync failed:', (error as Error).message),
+  );
+
   return {
     status: 200,
-    payload: { uid, username: clean, plan: user.plan },
+    payload: {
+      uid,
+      username: clean,
+      plan: user.plan,
+      userPath: userPathByUsername(clean, user.firebaseUid || user.uid),
+    },
   };
 }
 
@@ -229,6 +255,26 @@ export function submitPayment(
 
   db.payments.set(paymentId, record);
   db.saveToDisk();
+
+  // Publish the pending order to Firebase so the Termux tool can show it
+  // immediately, without waiting for an approval.
+  syncPayment({
+    id: paymentId,
+    uid: user.uid,
+    username: user.username,
+    termuxUsername: cleanUsername,
+    senderNumber: cleanSender,
+    plan: record.plan,
+    amount: record.amount,
+    currency: record.currency,
+    method: record.method,
+    transactionId: record.transactionId,
+    status: PAY_PENDING,
+    createdAt: record.createdAt,
+  }).catch((error) =>
+    console.warn('[firebase-sync] payment sync failed:', (error as Error).message),
+  );
+
   return {
     status: 201,
     payload: { paymentId, status: PAY_PENDING },
@@ -301,6 +347,36 @@ export function verifyPayment(
   db.payments.set(paymentId, payment);
   db.saveToDisk();
 
+  // Mirror to Firebase so the Termux tool sees the approval immediately.
+  // Without this the phone keeps seeing the old plan forever, because it reads
+  // Firebase while the server only ever wrote the local JSON.
+  firebaseSyncSubscription(
+    targetUid,
+    user.username,
+    user.email,
+    PLAN_PRO,
+    user.role,
+    user.subscription,
+  ).catch((error) =>
+    console.warn('[firebase-sync] subscription sync failed:', (error as Error).message),
+  );
+  syncPayment({
+    id: paymentId,
+    uid: targetUid,
+    username: user.username,
+    termuxUsername: payment.termuxUsername,
+    senderNumber: payment.senderNumber,
+    plan: payment.plan,
+    amount: payment.amount,
+    currency: payment.currency,
+    method: payment.method,
+    transactionId: payment.transactionId,
+    status: PAY_VERIFIED,
+    createdAt: payment.createdAt,
+  }).catch((error) =>
+    console.warn('[firebase-sync] payment sync failed:', (error as Error).message),
+  );
+
   return {
     status: 200,
     payload: {
@@ -308,6 +384,7 @@ export function verifyPayment(
       uid: targetUid,
       status: SUB_ACTIVE,
       expiresAt: newExpiry,
+      userPath: userPathByUsername(user.username, targetUid),
     },
   };
 }
@@ -334,6 +411,23 @@ export function rejectPayment(
   payment.reason = reason;
   db.payments.set(paymentId, payment);
   db.saveToDisk();
+
+  syncPayment({
+    id: paymentId,
+    uid: payment.uid,
+    username: payment.username,
+    termuxUsername: payment.termuxUsername,
+    senderNumber: payment.senderNumber,
+    plan: payment.plan,
+    amount: payment.amount,
+    currency: payment.currency,
+    method: payment.method,
+    transactionId: payment.transactionId,
+    status: PAY_REJECTED,
+    createdAt: payment.createdAt,
+  }).catch((error) =>
+    console.warn('[firebase-sync] payment sync failed:', (error as Error).message),
+  );
 
   return {
     status: 200,
